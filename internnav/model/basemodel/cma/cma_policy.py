@@ -153,6 +153,24 @@ class CMANet(PreTrainedModel):
                     setattr(text_encoder_config, k, v)
                 self.instruction_encoder = LanguageEncoder(text_encoder_config)
             self.use_instr_bert_encoder = True
+        elif hasattr(self.model_config, 'text_encoder') and self.model_config.text_encoder is not None:
+            # Support text_encoder even when policy_name != 'CMA_CLIP_Policy'
+            # This allows regular CMA_Policy to use text_encoder without needing image_encoder config
+            if self.model_config.text_encoder.model_name == 'clip-long':
+                self.instruction_encoder = InstructionLongCLIPEncoder(self.model_config.text_encoder)
+                self.txt_linear_512_to_256 = nn.Linear(512, 256)
+                self.instruction_encoder.output_size = 256
+            else:
+                if self.model_config.text_encoder.model_name in ['roberta']:
+                    config_name = 'roberta-base'
+                else:
+                    config_name = self.model_config.text_encoder.model_name
+                bert_config = PretrainedConfig.from_pretrained(config_name)
+                text_encoder_config = copy.deepcopy(bert_config)
+                for k, v in self.model_config.text_encoder.dict().items():
+                    setattr(text_encoder_config, k, v)
+                self.instruction_encoder = LanguageEncoder(text_encoder_config)
+            self.use_instr_bert_encoder = True
         else:
             self.instruction_encoder = InstructionEncoder(self.model_config.instruction_encoder)
 
