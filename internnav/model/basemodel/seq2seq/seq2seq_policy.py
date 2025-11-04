@@ -1,3 +1,4 @@
+import copy
 import os
 
 import numpy as np
@@ -9,7 +10,12 @@ from transformers import PretrainedConfig, PreTrainedModel
 
 from internnav.configs.model.base_encoders import ModelCfg
 from internnav.configs.trainer.exp import ExpCfg
-from internnav.model.encoder import InstructionEncoder, resnet_encoders
+from internnav.model.encoder import (
+    InstructionEncoder,
+    InstructionLongCLIPEncoder,
+    LanguageEncoder,
+    resnet_encoders,
+)
 from internnav.model.encoder.rnn_encoder import build_rnn_state_encoder
 
 try:
@@ -125,7 +131,33 @@ class Seq2SeqNet(PreTrainedModel):
         )
 
         # Init the instruction encoder
-        self.instruction_encoder = InstructionEncoder(self.model_config.instruction_encoder)
+        # Support both regular InstructionEncoder and text_encoder (CLIP-Long, etc.)
+        self.use_instr_bert_encoder = False
+        if hasattr(self.model_config, 'text_encoder') and self.model_config.text_encoder is not None:
+            # Use text_encoder for real semantic encoding (e.g., CLIP-Long)
+            if self.model_config.text_encoder.model_name == 'clip-long':
+                self.instruction_encoder = InstructionLongCLIPEncoder(self.model_config.text_encoder)
+                # CLIP-Long outputs 512-dim features, project to smaller dimension
+                self.txt_linear_512_to_256 = nn.Linear(512, 256)
+                self.instruction_embedding_size = 256  # Track the projected size
+
+            else:
+                # Support other text encoders (RoBERTa, BERT, etc.)
+                if self.model_config.text_encoder.model_name in ['roberta']:
+                    config_name = 'roberta-base'
+                else:
+                    config_name = self.model_config.text_encoder.model_name
+                bert_config = PretrainedConfig.from_pretrained(config_name)
+                text_encoder_config = copy.deepcopy(bert_config)
+                for k, v in self.model_config.text_encoder.dict().items():
+                    setattr(text_encoder_config, k, v)
+                self.instruction_encoder = LanguageEncoder(text_encoder_config)
+                self.instruction_embedding_size = text_encoder_config.hidden_size
+            self.use_instr_bert_encoder = True
+        else:
+            # Fallback to basic LSTM instruction encoder (dummy tokens)
+            self.instruction_encoder = InstructionEncoder(self.model_config.instruction_encoder)
+            self.instruction_embedding_size = self.instruction_encoder.output_size
 
         # Init the depth encoder
         assert self.model_config.depth_encoder.cnn_type in ['VlnResnetDepthEncoder']
@@ -154,7 +186,7 @@ class Seq2SeqNet(PreTrainedModel):
 
         # Init the RNN state decoder
         rnn_input_size = (
-            self.instruction_encoder.output_size
+            self.instruction_embedding_size
             + self.model_config.depth_encoder.output_size
             + self.model_config.rgb_encoder.output_size
         )
@@ -195,7 +227,27 @@ class Seq2SeqNet(PreTrainedModel):
         nn.init.constant_(self.progress_monitor.bias, 0)
 
     def _forward(self, observations, rnn_states, prev_actions, masks):
-        instruction_embedding = self.instruction_encoder(observations)
+        # Handle instruction encoding based on encoder type
+        # breakpoint()
+        if self.use_instr_bert_encoder:
+            # Using text_encoder (CLIP-Long, RoBERTa, etc.)
+            instr = observations['instruction']
+            txt_full_embeds, txt_masks, txt_cls_embeds = self.instruction_encoder(instr)
+
+            if hasattr(self, 'txt_linear_512_to_256'):
+                # For CLIP-Long: use txt_full_embeds and mean pool
+                # txt_full_embeds: [batch, seq_len, 512] -> mean -> [batch, 512] -> project to [batch, 256]
+                # This approach is proven stable in CMA (avoiding txt_cls_embeds edge cases)
+                # instruction_embedding = txt_full_embeds.mean(dim=1)  # [batch, 512]
+                # instruction_embedding = self.txt_linear_512_to_256(instruction_embedding)  # [batch, 256]
+                instruction_embedding = self.txt_linear_512_to_256(txt_full_embeds).mean(dim=1)  # [batch, 256]
+            else:
+                # For other encoders (RoBERTa, BERT), take mean over sequence
+                instruction_embedding = txt_full_embeds.mean(dim=1)
+        else:
+            # Using basic LSTM instruction encoder (dummy tokens)
+            instruction_embedding = self.instruction_encoder(observations)
+
         depth_embedding = self.depth_encoder(observations)
         rgb_embedding = self.rgb_encoder(observations)
 
