@@ -24,13 +24,32 @@ class LerobotAsLmdb:
     def get_data_by_key(self, key):
         # Special handling for vlnverse dataset (user's custom data)
         if 'vlnverse' in self.dataset_path:
-            # For vlnverse: keys like 'kujiale_0003_40_0'
-            # Scene is always 'kujiale_XXXX' (2 parts), rest is trajectory
+            # For vlnverse: keys like 'kujiale_0003_40_0' or 'kujiale_1100_fix_40_0'
+            # Need to intelligently detect where scene name ends and trajectory starts
             parts = key.split('_')
-            if len(parts) >= 4 and parts[0] == 'kujiale':
-                # kujiale_0003_40_0 -> scan='kujiale_0003', trajectory='40_0'
-                scan = '_'.join(parts[:2])  # 'kujiale_0003'
-                trajectory = '_'.join(parts[2:])  # '40_0'
+
+            if len(parts) >= 3 and parts[0] == 'kujiale':
+                # Strategy: trajectory IDs are usually numeric (like '40_0' or '0_0')
+                # Find the point where we have two consecutive numeric parts
+                scene_end_idx = 2  # Default: 'kujiale_XXXX' (first 2 parts)
+
+                # Scan from part index 2 onwards to find trajectory start
+                for i in range(2, len(parts) - 1):
+                    # Check if current part and next part are both numeric
+                    # This indicates the start of trajectory ID like '40_0'
+                    try:
+                        int(parts[i])
+                        int(parts[i + 1])
+                        # Found two consecutive numbers, trajectory starts here
+                        scene_end_idx = i
+                        break
+                    except ValueError:
+                        # Not both numeric, continue scanning
+                        # Update scene_end_idx to include this non-numeric part
+                        scene_end_idx = i + 1
+
+                scan = '_'.join(parts[:scene_end_idx])
+                trajectory = '_'.join(parts[scene_end_idx:])
             else:
                 # Fallback for non-kujiale scenes
                 scan = '_'.join(parts[:-1])
